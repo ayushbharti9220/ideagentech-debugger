@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Ideagentech Debugger</title>
+<style>
+:root{--bg:#f2f4f1;--fg:#16201c;--card:#fff;--mut:#5d6b64;--ac:#0b6e4f;--on:#fff;--bd:#d9dfda;--add:#d4f1de;--del:#fadcd6}
+@media(prefers-color-scheme:dark){:root{--bg:#0d1411;--fg:#e6ede9;--card:#151e19;--mut:#92a199;--ac:#4ade9f;--on:#06231a;--bd:#26332c;--add:#12452f;--del:#522620}}
+*{box-sizing:border-box}[hidden]{display:none!important}
+body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.55 system-ui,-apple-system,"Segoe UI",sans-serif}
+main{max-width:900px;margin:0 auto;padding:28px 16px 64px}
+h1{margin:0;font:700 28px/1.2 ui-monospace,Menlo,Consolas,monospace;letter-spacing:-.02em}
+.sub{color:var(--mut);margin:6px 0 16px}.warn{font-size:13px;color:var(--mut)}
+.card{background:var(--card);border:1px solid var(--bd);border-radius:10px;padding:16px;margin:14px 0}
+.tabs{display:flex;gap:8px}.tabs button{flex:1}
+button{font:inherit;padding:9px 14px;border-radius:8px;border:1px solid var(--bd);background:var(--card);color:var(--fg);cursor:pointer}
+button.on,button.pri{background:var(--ac);color:var(--on);border-color:var(--ac);font-weight:600}
+button:disabled{opacity:.5;cursor:wait}button:focus-visible,textarea:focus-visible,input:focus-visible{outline:2px solid var(--ac);outline-offset:2px}
+textarea,input[type=text],input[type=password]{width:100%;margin:6px 0 10px;padding:9px;border:1px solid var(--bd);border-radius:8px;background:var(--bg);color:var(--fg);font:13px/1.45 ui-monospace,Menlo,Consolas,monospace}
+textarea{min-height:170px;resize:vertical}label{font-weight:600;display:block}
+pre{overflow:auto;max-height:420px;background:var(--bg);padding:10px;border-radius:8px;font:12.5px/1.45 ui-monospace,Menlo,Consolas,monospace;margin:8px 0}
+pre div{white-space:pre}.a{background:var(--add)}.d{background:var(--del)}
+.row{display:flex;justify-content:space-between;gap:12px;padding:5px 0;border-bottom:1px solid var(--bd);font-size:13px}
+details{border-top:1px solid var(--bd);padding:8px 0}summary{cursor:pointer;font-weight:600}
+</style></head><body><main>
+<h1>ideagentech debugger</h1>
+<p class="sub">Paste code or upload a project zip. Get corrected code back. No login, nothing saved: close the tab and it is gone.</p>
+<p class="warn">Your code is sent to Google's Gemini API to be analysed. Do not upload passwords, API keys or confidential code. AI fixes can be wrong, so review every change before using it.</p>
+
+<div class="card"><label for="key">Your Gemini API key (optional)</label>
+<input type="password" id="key" placeholder="Only needed if the shared quota runs out. Kept in this tab's memory only." autocomplete="off"></div>
+
+<div class="tabs"><button class="on" data-t="quick">Fix code</button><button data-t="proj">Fix a project (zip)</button></div>
+
+<section id="quick" class="card">
+  <label for="qcode">Code</label>
+  <textarea id="qcode" placeholder="Paste code in any language"></textarea>
+  <input type="file" id="qfile"> 
+  <input type="text" id="qname" placeholder="File name, e.g. app.py (optional, helps detect the language)">
+  <button class="pri" id="qgo">Fix code</button>
+  <div id="qout"></div>
+</section>
+
+<section id="proj" class="card" hidden>
+  <label for="zip">Project zip (25 MB max)</label>
+  <input type="file" id="zip" accept=".zip">
+  <label for="desc">What are you building, and what is going wrong?</label>
+  <textarea id="desc" placeholder="Example: A Flask API for a to-do app. Login returns a 500 error and the tests fail."></textarea>
+  <button class="pri" id="zgo">Analyse and fix project</button>
+  <div id="prog"></div><div id="zres"></div>
+</section>
+<p class="warn">Ideagentech Debugger. Free and stateless: no accounts, no history, no database.</p>
+</main>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+<script>
+const $=id=>document.getElementById(id),sleep=ms=>new Promise(r=>setTimeout(r,ms));
+const KEY=()=>$("key").value.trim(),MAX=60000;
+const esc=s=>String(s==null?"":s).replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
+let dirty=false;addEventListener("beforeunload",e=>{if(dirty){e.preventDefault();e.returnValue=""}});
+const CODE=/\.(js|jsx|mjs|cjs|ts|tsx|py|java|c|h|cc|cpp|hpp|cs|go|rs|rb|php|swift|kt|scala|sh|bash|sql|html|css|scss|vue|svelte|dart|lua|r|pl|json|ya?ml|toml|xml|gradle)$/i;
+const SKIP=/(^|\/)(node_modules|\.git|dist|build|\.next|venv|\.venv|__pycache__|vendor|target|coverage)\/|\.min\.(js|css)$|(^|\/)(package-lock\.json|yarn\.lock|pnpm-lock\.yaml)$/i;
+
+document.querySelectorAll(".tabs button").forEach(b=>b.onclick=()=>{
+  document.querySelectorAll(".tabs button").forEach(x=>x.classList.toggle("on",x===b));
+  $("quick").hidden=b.dataset.t!=="quick";$("proj").hidden=b.dataset.t!=="proj"});
+
+async function api(body,tries=3){
+  for(let a=0;a<tries;a++){
+    let r,j;
+    try{r=await fetch("/api/fix",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({...body,userKey:KEY()})});j=await r.json()}
+    catch(e){j={error:"Network or server error"}; if(a<tries-1){await sleep(2000);continue}throw new Error(j.error)}
+    if(r.ok)return j;
+    if(r.status===429&&a<tries-1){await sleep(8000*(a+1));continue}
+    throw new Error(j.error||"Request failed");
+  }
+}
+function dl(name,data){const a=document.createElement("a");a.href=URL.createObjectURL(data instanceof Blob?data:new Blob([data]));a.download=name;a.click()}
+function diffHtml(x,y){
+  const a=x.split("\n"),b=y.split("\n"),n=a.length,m=b.length;
+  if(n*m>9e6)return "<div>File too large to show a diff. Use the downloaded result.</div>";
+  const t=Array.from({length:n+1},()=>new Uint16Array(m+1));
+  for(let i=n-1;i>=0;i--)for(let j=m-1;j>=0;j--)t[i][j]=a[i]===b[j]?t[i+1][j+1]+1:Math.max(t[i+1][j],t[i][j+1]);
+  let i=0,j=0;const o=[];
+  while(i<n&&j<m){if(a[i]===b[j]){i++;j++}else if(t[i+1][j]>=t[i][j+1])o.push("-"+a[i++]);else o.push("+"+b[j++])}
+  while(i<n)o.push("-"+a[i++]);while(j<m)o.push("+"+b[j++]);
+  return o.map(l=>`<div class="${l[0]=="+"?"a":"d"}">${esc(l)}</div>`).join("")||"<div>No changes</div>";
+}
+function show(r,orig){
+  return `<p><b>${esc(r.summary||"")}</b></p>`+(r.issues||[]).map(i=>`<div class="row"><span>${esc(i.severity)}, line ${esc(i.line)}</span><span>${esc(i.explanation)}</span></div>`).join("")+`<pre>${diffHtml(orig,r.fixed_code||orig)}</pre>`;
+}
+
+$("qfile").onchange=async e=>{const f=e.target.files[0];if(f){$("qcode").value=await f.text();$("qname").value=f.name}};
+$("qgo").onclick=async()=>{
+  const code=$("qcode").value;if(!code.trim())return;
+  if(code.length>MAX){$("qout").textContent="This file is too large for one request. Put it in a zip and use the project tab.";return}
+  $("qgo").disabled=true;$("qout").textContent="Analysing…";
+  try{
+    const r=await api({mode:"fix",path:$("qname").value||"snippet",code});
+    if(typeof r.fixed_code!=="string")r.fixed_code=code;
+    dirty=true;
+    $("qout").innerHTML=show(r,code)+`<button id="qcp">Copy fixed code</button> <button id="qdl">Download fixed file</button>`;
+    $("qcp").onclick=()=>navigator.clipboard.writeText(r.fixed_code);
+    $("qdl").onclick=()=>dl($("qname").value||"fixed.txt",r.fixed_code);
+  }catch(e){$("qout").textContent="Error: "+e.message}
+  $("qgo").disabled=false;
+};
+
+$("zgo").onclick=async()=>{
+  const f=$("zip").files[0];
+  if(!f){alert("Choose a zip file first.");return}
+  if(f.size>25e6){alert("The zip is larger than 25 MB.");return}
+  const desc=$("desc").value.trim(),log=$("prog");log.innerHTML="";$("zres").innerHTML="";$("zgo").disabled=true;
+  try{
+    const zip=await JSZip.loadAsync(f),out=new JSZip(),files=[],skipped=[];
+    const names=Object.keys(zip.files).filter(n=>!zip.files[n].dir);
+    if(names.length>400)throw new Error("Too many files (400 max). Remove folders you do not need.");
+    for(const n of names){
+      const e=zip.files[n];
+      if(!SKIP.test(n)&&CODE.test(n)){
+        const t=await e.async("string");
+        if(t.length<=MAX&&files.length<120){files.push({p:n,t});continue}
+        skipped.push(n+" (too large, or over the 120 file limit)");
+      }
+      out.file(n,await e.async("uint8array"));
+    }
+    if(!files.length)throw new Error("No code files found in this zip.");
+    log.innerHTML=files.map((x,i)=>`<div class="row"><span>${esc(x.p)}</span><span id="s${i}">queued</span></div>`).join("");
+    const set=(i,t)=>{$("s"+i).textContent=t};
+    const map=files.map(x=>x.p).join("\n");
+    let targets=files.map((_,i)=>i);
+    try{
+      const a=await api({mode:"analyze",description:desc,projectMap:map,code:files.map(x=>"### "+x.p+"\n"+x.t.slice(0,300)).join("\n").slice(0,100000)});
+      const s=new Set(a.files||[]);
+      if(s.size)targets=targets.filter(i=>s.has(files[i].p));
+    }catch(e){}
+    files.forEach((_,i)=>{if(!targets.includes(i))set(i,"skipped (looks fine)")});
+    const res=[];let next=0,stop=null;
+    async function worker(){
+      while(!stop){
+        const k=next++;if(k>=targets.length)return;
+        const i=targets[k],x=files[i];set(i,"fixing…");
+        try{
+          const r=await api({mode:"fix",path:x.p,code:x.t,description:desc,projectMap:map});
+          if(typeof r.fixed_code!=="string"||(r.changed&&x.t.length>400&&r.fixed_code.length<x.t.length*.5)){set(i,"skipped: AI output looked incomplete");continue}
+          res.push({...r,p:x.p,orig:x.t});set(i,r.changed?"fixed":"no issues");
+        }catch(e){set(i,"failed: "+e.message);if(/quota|key/i.test(e.message))stop=e.message}
+      }
+    }
+    await Promise.all([worker(),worker()]);
+    const byPath=new Map(res.map(r=>[r.p,r]));
+    files.forEach(x=>{const r=byPath.get(x.p);out.file(x.p,r&&r.changed?r.fixed_code:x.t)});
+    const changed=res.filter(r=>r.changed);
+    out.file("CHANGES.md","# Changes by Ideagentech Debugger\n\nAI-generated. Review before use.\n\n"+(changed.map(r=>`## ${r.p}\n${r.summary||""}\n`+(r.issues||[]).map(i=>`- [${i.severity}] line ${i.line}: ${i.explanation}`).join("\n")).join("\n\n")||"No changes were made.")+(stop?`\n\nStopped early: ${stop}\n`:""));
+    const blob=await out.generateAsync({type:"blob"});dirty=true;
+    $("zres").innerHTML=(stop?`<p><b>Stopped early: ${esc(stop)}</b> The zip below has the files fixed so far.</p>`:"")+
+      `<p><button class="pri" id="zdl">Download fixed zip</button></p>`+
+      changed.map(r=>`<details><summary>${esc(r.p)}</summary>${show(r,r.orig)}</details>`).join("")+
+      (skipped.length?`<p class="warn">Not processed: ${esc(skipped.join(", "))}</p>`:"");
+    $("zdl").onclick=()=>dl("fixed-project.zip",blob);
+  }catch(e){log.innerHTML=`<p><b>Error:</b> ${esc(e.message)}</p>`}
+  $("zgo").disabled=false;
+};
+</script></body></html>
